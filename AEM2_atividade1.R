@@ -29,6 +29,23 @@ dados<- Bikeshare
 dados %>% skim()
 
 
+
+# Analise da variavel objetivo --------------------------------------------
+
+dados %>% 
+  ggplot(aes(x=bikers)) +
+  geom_histogram(binwidth = 1, fill = "blue", color = "black") +
+  labs(title = "Histogram of bikes rentals per hour", x = "bikers", y = "Frequency")+
+  theme_bw()
+
+# dado o skew da variável, será interessante transformarmos a variavel para Log
+
+dados %>% 
+  ggplot(aes(x=hr,y=bikers,color=season,group=day))+
+  geom_line()
+
+
+
 # ajustes básicos de dados --------------------------------------------------------
 
 
