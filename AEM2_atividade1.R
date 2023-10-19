@@ -122,10 +122,100 @@ fitted <- tibble(
 # XGBoost - formato tidymodels --------------------------------------------
 
 
+#receita
+(receita <- recipe(bikers ~ ., data = treinamento) %>% 
+   step_log(bikers) %>%  #transforma em ln a variavel objetivo
+   step_normalize(all_numeric(), -all_outcomes()) %>%  #normalizando as variaveis
+   step_dummy(all_nominal(), -all_outcomes())) # dummy enconding
 
+
+#prep receita
+(receita_prep <- prep(receita)) # prepara a receita definida acima - pre processamento do recipe
+
+
+# bake na base de teste e treino
+treinamento_proc <- bake(receita_prep, new_data = NULL) # obtem os dados de treinamento processados
+teste_proc <- bake(receita_prep, new_data = teste) # obtem os dados de teste processados
+
+# checando os dados processados
+skim(treinamento_proc)
+skim(teste_proc)
+
+
+# Modelo
+
+boost <- boost_tree( trees = tune(), learn_rate = tune(), mtry = tune(), 
+                     tree_depth = tune(), min_n = tune(), sample_size = tune()) %>% 
+  set_engine('xgboost') %>% 
+  set_mode('regression')
+
+# cv
+set.seed(123)
+cv_split <- vfold_cv(treinamento, v=10)
+
+
+# otimização de hiperparametro
+doParallel::registerDoParallel(makeCluster(8))  #alterar para o numero de cores da sua maquina
+set.seed(123)
+boost_grid <- tune_grid(boost,
+                        receita,
+                        resamples = cv_split,
+                        grid = 50,
+                        metrics = metric_set(rmse))
+
+autoplot(boost_grid) # plota os resultados do grid search
+
+boost_grid %>% 
+  collect_metrics()   # visualiza o tibble de resultados
+
+(best_xgb <- boost_grid %>% 
+    select_best("rmse")) # salva o melhor conjunto de parametros
+
+
+#finaliza o modelo
+boost_fit <- finalize_model(boost, parameters= best_xgb) %>% 
+  fit(bikers ~ ., teste_proc )
+
+# tibble de predições
+fitted_xgb <- boost_fit %>% 
+  predict(new_data = teste_proc) %>% 
+  mutate(observado = teste_proc$bikers,
+         modelo = 'xgboost tune - tidymodels')
+
+
+# visualizando variáveis mais importantes
+vip(boost_fit)
+
+
+#plot predito vs realizado em base LN
+fitted_xgb %>% 
+  ggplot(aes(x=observado, y=.pred)) +
+  geom_point(size=1, col= 'blue') +
+  geom_abline(intercept = 0, slope = 1,color = "red", linetype = "dashed", linewidth = 0.7) +
+  labs(y = 'predito xgboost', x = 'Observado') +
+  theme_bw()
+
+#plot predito vs realizado na base original
+fitted_xgb %>% 
+  ggplot(aes(x=exp(observado),y= exp(.pred))) +
+  geom_point(size=1, col= 'blue') +
+  geom_abline(intercept = 0, slope = 1,color = "red", linetype = "dashed", linewidth = 0.7) +
+  labs(y = 'predito xgboost', x = 'Observado') +
+  theme_bw()
+
+# adicionando ao tibble de resultados
+fitted <-  fitted %>% 
+  bind_rows(fitted_xgb)
 
 
 # Resultados e comentários finais -----------------------------------------
+
+
+fitted %>% 
+  group_by(modelo) %>% 
+  metrics(truth = observado, estimate = .pred) %>% 
+  filter(.metric=='rmse')
+
 
 
 
