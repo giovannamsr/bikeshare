@@ -34,8 +34,7 @@ dados <- Bikeshare
 
 dados %>% skim() # não há dados faltantes, bikers possui distribuição exponencial # nolint
 dados %>% glimpse() # passar pra fator: season, holiday, weekday, workingday
-
-
+# e day?
 
 # Analise da variavel objetivo --------------------------------------------
 
@@ -53,7 +52,6 @@ dados %>%
   geom_line()
 
 # ajustes básicos de dados -------------------
-
 
 #retirar variavel 'casual' e 'registered' para evitar dataleak
 #df<- dados %>% dplyr::select(-c(casual,registered))
@@ -103,6 +101,42 @@ fitted <- tibble(.pred = numeric(0),
                  modelo = character(0))
 
 # Transformação de dados - formato usual -------------------------
+
+#copia das bases de teste e treinamento
+treinamento_usual <- treinamento
+teste_usual <- teste
+
+# Remover as colunas 'casual' e 'registered'
+treinamento_usual <- treinamento_usual %>%
+  select(-casual, -registered)
+teste_usual <- teste_usual %>%
+  select(-casual, -registered)
+
+# Remover variáveis que contém apenas 1 valor
+treinamento_usual <- treinamento_usual %>%
+  select_if(~!all(is.na(.)) & length(unique(.)) > 1)
+teste_usual <- teste[, colnames(treinamento_usual)]
+
+# Normalizar as variáveis numéricas
+numeric_columns <- names(which(sapply(treinamento_usual, is.numeric)))
+treinamento_usual[numeric_columns] <- scale(treinamento_usual[numeric_columns])
+teste_usual[numeric_columns] <- scale(teste_usual[numeric_columns])
+
+# Criar variáveis dummy para variáveis nominais
+nominal_columns <- names(Filter(function(x) is.factor(x) || is.character(x), treinamento_usual))
+treinamento_usual <- treinamento_usual %>%
+  mutate(across(all_of(nominal_columns), as.factor)) %>%
+  model.matrix(~ . - 1, data = .) %>%
+  as.data.frame()
+
+teste_usual <- teste_usual %>%
+  mutate(across(all_of(nominal_columns), as.factor)) %>%
+  model.matrix(~ . - 1, data = .) %>%
+  as.data.frame()
+
+# Checar os dados processados
+summary(treinamento_usual)
+
 
 # Transformação de dados - formato tidymodels --------------------
 
@@ -179,7 +213,7 @@ boost_grid %>%
   arrange(mean)
 
 (best_xgb <- boost_grid %>%
-   select_best("rmse")) # salva o melhor conjunto de parametros
+    select_best("rmse")) # salva o melhor conjunto de parametros
 
 #faz o fit do modelo com o melhor conjunto de hiperparâmetros
 boost_fit <- finalize_model(boost, parameters = best_xgb) %>%
