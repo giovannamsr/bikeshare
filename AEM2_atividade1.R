@@ -134,8 +134,12 @@ teste_usual <- teste_usual %>%
   model.matrix(~ . - 1, data = .) %>%
   as.data.frame()
 
+treinamento_usual <- subset(treinamento_usual, select = -season1)
+teste_usual <- subset(teste_usual, select = -season1)
+
 # Checar os dados processados
 summary(treinamento_usual)
+summary(teste_usual)
 
 
 # Transformação de dados - formato tidymodels --------------------
