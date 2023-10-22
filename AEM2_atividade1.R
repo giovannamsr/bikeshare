@@ -26,7 +26,8 @@ library(factoextra)
 library(ggrepel)
 library(plotly)
 library(cluster)
-
+library(ranger)
+library(randomForest)
 
 # input de dados ----------------------------------------------------------
 
@@ -134,8 +135,13 @@ teste_usual <- teste_usual %>%
   model.matrix(~ . - 1, data = .) %>%
   as.data.frame()
 
+#ajuste de colunas
 treinamento_usual <- subset(treinamento_usual, select = -season1)
 teste_usual <- subset(teste_usual, select = -season1)
+col_usual <- colnames(treinamento_usual)
+new_col_names_usual <- gsub("[ /]", "_", col_usual)
+colnames(treinamento_usual) <- new_col_names_usual
+colnames(teste_usual) <- new_col_names_usual
 
 # Checar os dados processados
 summary(treinamento_usual)
@@ -170,18 +176,56 @@ skim(treinamento_proc)
 skim(teste_proc)
 
 # Modelo1 - formato usual -------------------------------------------------
-
-
-
-
+(rf <- ranger(bikers ~ ., 
+              num.trees = 500,
+              #mtry = 3,
+              #min.node.size = 70,
+              #max.depth = 15,
+              data = treinamento_usual,
+              classification = FALSE))
 
 # Modelo 1 - formato tidymodels -------------------------------------------
 
+# Definir os hiperparâmetros para busca
+rf <- rand_forest(trees = tune(), mtry = tune(), min_n = tune()) %>%
+  set_engine("randomForest") %>%
+  set_mode("regression")
 
+# CV
+set.seed(123)
+cv_split <- vfold_cv(treinamento_proc, v = 10)
 
+# Otimização de hiperparâmetros
+doParallel::registerDoParallel(makeCluster(8))  # Defina o número de núcleos apropriado
 
+tempo <- system.time({
+  set.seed(123)
+  rf_grid <- tune_grid(rf,
+                       recipe(bikers ~ ., data = treinamento_proc),
+                       resamples = cv_split,
+                       grid = 200,
+                       metrics = metric_set(rmse))
+})
 
+autoplot(rf_grid)  # Plota os resultados do grid search
 
+rf_grid %>%
+  collect_metrics() %>%   # Visualiza o tibble de resultados
+  arrange(mean)
+
+# Seleciona o melhor conjunto de hiperparâmetros
+best_rf <- rf_grid %>%
+  select_best("rmse")
+
+# Faz o fit do modelo com o melhor conjunto de hiperparâmetros
+rf_fit <- finalize_model(rf, parameters = best_rf) %>%
+  fit(bikers ~ ., data = teste_proc)
+
+# Tibble de predições
+fitted_rf <- rf_fit %>%
+  predict(new_data = teste_proc) %>%
+  mutate(observado = teste_proc$bikers,
+         modelo = "Random Forest - tidymodels")
 
 # XGBoost - formato antigo-------------------------------------------------
 
