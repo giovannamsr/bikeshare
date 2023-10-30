@@ -286,7 +286,7 @@ sqrt(mean((teste_usual$bikers - pred_lm)^2))
 # XGBoost - formato tidymodels --------------------------------------------
 
 boost <- boost_tree(trees = tune(), learn_rate = tune(), mtry = tune(),
-                    tree_depth = 2, min_n = tune(), sample_size = tune()) %>%
+                    tree_depth = tune(), min_n = tune(), sample_size = tune()) %>%
   set_engine("xgboost") %>%
   set_mode("regression")
 
