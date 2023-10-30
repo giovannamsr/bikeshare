@@ -1,5 +1,5 @@
 
-
+  
 #Atividade 1
 
 # utilizaremos a base de dados Bikeshare do pacote ISLR2 feito pela UCI
@@ -28,6 +28,8 @@ library(plotly)
 library(cluster)
 library(ranger)
 library(randomForest)
+library(xgboost)
+library(pROC)
 
 # input de dados ----------------------------------------------------------
 
@@ -152,8 +154,8 @@ summary(teste_usual)
 
 #faz a receita e prepara
 (receita <- recipe(bikers ~ ., data = treinamento) %>%
-   #step_log(bikers) %>% #transforma em ln a variavel objetivo
-   step_rm(casual, registered) %>% #remove as 2 (sem sentido para o modelo)
+   #step_log(bikers) %>% #Rodamos o modelo com e sem LN e os resultados finais ficaram melhor sem o LN
+   step_rm(casual, registered) %>% #remove as 2 (evita data leak, o somatorio das 2 é igual a variavel objetivo)
    #step_meaninput() %>%
    #step_medianinput() %>%
    #step_modeinput() %>%
@@ -175,7 +177,7 @@ teste_proc <- bake(receita_prep, new_data = teste)
 skim(treinamento_proc)
 skim(teste_proc)
 
-# Modelo1 - formato usual -------------------------------------------------
+# Floresta Aleatoria - formato antigo -------------------------------------------------
 (rf <- ranger(bikers ~ ., 
               num.trees = 500,
               #mtry = 3,
@@ -184,7 +186,7 @@ skim(teste_proc)
               data = treinamento_usual,
               classification = FALSE))
 
-# Modelo 1 - formato tidymodels -------------------------------------------
+# Floresta Aleatoria - formato tidymodels -------------------------------------------
 
 # Definir os hiperparâmetros para busca
 rf <- rand_forest(trees = tune(), mtry = tune(), min_n = tune()) %>%
@@ -230,11 +232,61 @@ fitted_rf <- rf_fit %>%
 # XGBoost - formato antigo-------------------------------------------------
 
 
+#criar matrix
 
+dtrain <- xgb.DMatrix(label = treinamento_usual$bikers, 
+                      data = as.matrix(select(treinamento_usual, -bikers))) #transformar a base de treino em matrix
+
+dtest <- xgb.DMatrix(label = teste_usual$bikers,
+                     data = as.matrix(select(teste_usual, -bikers)))  #transformar a base de teste em matrix
+
+(fit_xgb <- xgb.train(data = dtrain, nrounds = 100, max_depth = 1, eta = 0.3,
+                      nthread = 3, verbose = FALSE, objective = "reg:squarederror"))
+
+importancia <- xgb.importance(model = fit_xgb)
+xgb.plot.importance(importancia, rel_to_first = TRUE, top_n = 10, xlab = "Relative Import")
+
+
+pred_xgb <- predict(fit_xgb, dtest)
+sqrt(mean((pred_xgb - teste_usual$bikers)^2))
+
+
+ajusta_bst <- function(splits, eta, nrounds, max_depth) {
+  dtrain <- xgb.DMatrix(label = treinamento_usual$bikers,
+                          data = as.matrix(select(treinamento_usual, -bikers)))
+  dtest <- xgb.DMatrix(label = teste_usual$bikers,
+                         data = as.matrix(select(teste_usual, bikers)))
+  fit <- xgb.train(data = dtrain, nrounds = nrounds, max_depth = max_depth, eta = eta,
+                   nthread = 3, verbose = FALSE, objective = "reg:squarederror")
+  eqm <- mean((teste_usual$bikers - predict(fit, as.matrix(select(teste_usual, -bikers))))^2)
+  return(sqrt(eqm))
+}
+
+set.seed(123)
+hiperparametros <- crossing(eta = c(.01, .1),
+                            nrounds = c(250, 750),
+                            max_depth = c(1, 4))
+resultados <- rsample::vfold_cv(treinamento_usual, 5) %>%
+  crossing(hiperparametros) %>%
+  mutate(reqm = pmap_dbl(list(splits, eta, nrounds, max_depth), ajusta_bst))
+resultados %>%
+  group_by(eta, nrounds, max_depth) %>%
+  summarise(reqm = mean(reqm)) %>%
+  arrange(reqm)
+
+fit_xgb <- xgb.train(data = dtrain, nrounds = 750, max_depth = 2, eta = 0.3,
+                     nthread = 3, verbose = FALSE, objective = "reg:squarederror")
+pred_xgb <- predict(fit_xgb, dtest)
+sqrt(mean((teste_usual$bikers - pred_xgb)^2))
+
+fit_lm <- lm(bikers ~ ., treinamento_usual)
+pred_lm <- predict(fit_lm, teste_usual)
+sqrt(mean((teste_usual$bikers - pred_lm)^2))
+  
 # XGBoost - formato tidymodels --------------------------------------------
 
 boost <- boost_tree(trees = tune(), learn_rate = tune(), mtry = tune(),
-                    tree_depth = 2, min_n = tune(), sample_size = tune()) %>%
+                    tree_depth = tune(), min_n = tune(), sample_size = tune()) %>%
   set_engine("xgboost") %>%
   set_mode("regression")
 
@@ -300,7 +352,3 @@ fitted %>%
   filter(.metric=='rmse')
 
 
-tempo
-#resultado de teste:
-#tempo = 517s tree_deepth=tune()  grid=50  MSE=53
-#tempo = 707s tree_deepth=2       grid=200 MSE=23.6
