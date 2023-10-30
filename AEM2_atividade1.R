@@ -56,10 +56,6 @@ dados %>%
 
 # ajustes básicos de dados -------------------
 
-#retirar variavel 'casual' e 'registered' para evitar dataleak
-#df<- dados %>% dplyr::select(-c(casual,registered))
-#skim(df)
-
 # transformando em fatores variáveis categoricas que estao como numericas
 df <- dados %>%
   mutate(season = as.factor(season),
@@ -91,7 +87,6 @@ df %>% nrow()
 # Training - test split ---------------------------------------------------
 
 set.seed(321)
-
 split <- initial_split(df, prop = 0.8)
 treinamento <- training(split)
 teste <- testing(split)
@@ -122,6 +117,7 @@ teste_usual <- teste[, colnames(treinamento_usual)]
 
 # Normalizar as variáveis numéricas
 numeric_columns <- names(which(sapply(treinamento_usual, is.numeric)))
+numeric_columns <- numeric_columns[numeric_columns!='bikers']
 treinamento_usual[numeric_columns] <- scale(treinamento_usual[numeric_columns])
 teste_usual[numeric_columns] <- scale(teste_usual[numeric_columns])
 
@@ -177,20 +173,77 @@ teste_proc <- bake(receita_prep, new_data = teste)
 skim(treinamento_proc)
 skim(teste_proc)
 
+
 # Floresta Aleatoria - formato antigo -------------------------------------------------
-(rf <- ranger(bikers ~ ., 
-              num.trees = 500,
-              #mtry = 3,
-              #min.node.size = 70,
-              #max.depth = 15,
-              data = treinamento_usual,
-              classification = FALSE))
+
+#função para otimizar hiperparametros
+func_rf_hiper <- function(splits, mtry, num.trees, min.node.size){
+  
+  message('running:split=', splits$id,", mtry =", mtry, ", num.trees =", num.trees, ", min.node.size =", min.node.size)
+  
+  tr_rh <- training(splits)
+  test_rf <- testing(splits)
+  
+  rf_h <- ranger(bikers ~ ., data = tr_rh, mtry = mtry, num.trees = num.trees, min.node.size = min.node.size)  
+  
+  RMSE_rf_h <- sqrt(mean((test_rf$bikers - predict(rf_h, test_rf)$predictions)^2))
+  
+  return(RMSE_rf_h)
+}
+
+
+#rodando o gridsearch e salvando os resultados
+
+doParallel::registerDoParallel(makeCluster(20)) #colocar nro de cores da maquina
+set.seed(123)
+resultados_rf <- crossing(rsample::vfold_cv(treinamento_usual, v = 10),
+                          mtry= c(2,6,10),
+                          num.trees = c(seq(200,1000,200)),
+                          min.node.size = c(15,30,50))  %>% 
+  mutate(RMSE= pmap_dbl(list(splits,mtry, num.trees, min.node.size),func_rf_hiper))
+  
+
+resultados_rf %>% 
+  group_by(mtry,num.trees,min.node.size) %>% 
+  summarize(RMSE_medio = mean(RMSE), RMSE_sd = sd(RMSE)) %>% 
+  arrange(RMSE_medio)
+
+#melhor resultado:  mtry = 10, num.trees = 800, min.node.size = 15,
+
+
+# rodando a versão final do modelo e calculando o erro
+
+rf_usual <- ranger(bikers ~ ., data = treinamento_usual, 
+             mtry=10, num.trees = 800, min.node.size = 15, 
+             importance = "impurity")
+
+predict_rf <- predict(rf_usual, teste_usual)$predictions
+
+fitted_rf_usual <- tibble(
+  .pred = predict_rf,
+  observado = teste_usual$bikers,
+  modelo = "random forest - usual")
+
+fitted <-  fitted %>% 
+  bind_rows(fitted_rf_usual)
+
+#visualizando erro
+ggplot() +
+  geom_point(aes(x=teste_usual$bikers, y = predict_rf))+
+  geom_abline(intercept = 0, slope = 1,color = "red", linetype = "dashed", linewidth = 0.7) +
+  theme_bw()
+
+#visualizando importancia das variáveis explicativas
+vip::vip(rf_usual, aesthetics = list(fill = "#FF5757")) 
+
+
+
 
 # Floresta Aleatoria - formato tidymodels -------------------------------------------
 
 # Definir os hiperparâmetros para busca
 rf <- rand_forest(trees = tune(), mtry = tune(), min_n = tune()) %>%
-  set_engine("randomForest") %>%
+  set_engine("ranger") %>%
   set_mode("regression")
 
 # CV
@@ -198,7 +251,7 @@ set.seed(123)
 cv_split <- vfold_cv(treinamento_proc, v = 10)
 
 # Otimização de hiperparâmetros
-doParallel::registerDoParallel(makeCluster(8))  # Defina o número de núcleos apropriado
+doParallel::registerDoParallel(makeCluster(16))  # Defina o número de núcleos apropriado
 
 tempo <- system.time({
   set.seed(123)
@@ -240,49 +293,80 @@ dtrain <- xgb.DMatrix(label = treinamento_usual$bikers,
 dtest <- xgb.DMatrix(label = teste_usual$bikers,
                      data = as.matrix(select(teste_usual, -bikers)))  #transformar a base de teste em matrix
 
-(fit_xgb <- xgb.train(data = dtrain, nrounds = 100, max_depth = 1, eta = 0.3,
-                      nthread = 3, verbose = FALSE, objective = "reg:squarederror"))
-
-importancia <- xgb.importance(model = fit_xgb)
-xgb.plot.importance(importancia, rel_to_first = TRUE, top_n = 10, xlab = "Relative Import")
+# nao precisa rodar o modelo antes do gridsearch - apagar ate linha 306
+#(fit_xgb <- xgb.train(data = dtrain, nrounds = 100, max_depth = 1, eta = 0.3,
+#                      nthread = 3, verbose = FALSE, objective = "reg:squarederror"))
 
 
-pred_xgb <- predict(fit_xgb, dtest)
-sqrt(mean((pred_xgb - teste_usual$bikers)^2))
+#importancia <- xgb.importance(model = fit_xgb)
+#xgb.plot.importance(importancia, rel_to_first = TRUE, top_n = 10, xlab = "Relative Import")
+
+
+#pred_xgb <- predict(fit_xgb, dtest)
+#sqrt(mean((pred_xgb - teste_usual$bikers)^2))
 
 
 ajusta_bst <- function(splits, eta, nrounds, max_depth) {
-  dtrain <- xgb.DMatrix(label = treinamento_usual$bikers,
+  
+  dtrain <- xgb.DMatrix(label = treinamento_usual$bikers, 
                           data = as.matrix(select(treinamento_usual, -bikers)))
   dtest <- xgb.DMatrix(label = teste_usual$bikers,
                          data = as.matrix(select(teste_usual, bikers)))
+  #alterar para linhas abaixo:
+  #dtrain <- training(splits) 
+  #dtest <- testing(splits)
+  
   fit <- xgb.train(data = dtrain, nrounds = nrounds, max_depth = max_depth, eta = eta,
-                   nthread = 3, verbose = FALSE, objective = "reg:squarederror")
-  eqm <- mean((teste_usual$bikers - predict(fit, as.matrix(select(teste_usual, -bikers))))^2)
-  return(sqrt(eqm))
+                   nthread = 24, verbose = FALSE, objective = "reg:squarederror")
+  
+  RMSE_xgb <- sqrt(mean((dtest$bikers - predict(fit, dtest_xgb))^2))
+  return(RMSE_xgb)
 }
 
+
+hiperparametros_xgb <- crossing(eta = c(.01, .1),
+                            nrounds = c(250, 500, 750),
+                            max_depth = c(1, 3))
+
 set.seed(123)
-hiperparametros <- crossing(eta = c(.01, .1),
-                            nrounds = c(250, 750),
-                            max_depth = c(1, 4))
 resultados <- rsample::vfold_cv(treinamento_usual, 5) %>%
-  crossing(hiperparametros) %>%
+  crossing(hiperparametros_xgb) %>%
   mutate(reqm = pmap_dbl(list(splits, eta, nrounds, max_depth), ajusta_bst))
+
 resultados %>%
   group_by(eta, nrounds, max_depth) %>%
   summarise(reqm = mean(reqm)) %>%
   arrange(reqm)
 
-fit_xgb <- xgb.train(data = dtrain, nrounds = 750, max_depth = 2, eta = 0.3,
-                     nthread = 3, verbose = FALSE, objective = "reg:squarederror")
-pred_xgb <- predict(fit_xgb, dtest)
-sqrt(mean((teste_usual$bikers - pred_xgb)^2))
 
-fit_lm <- lm(bikers ~ ., treinamento_usual)
-pred_lm <- predict(fit_lm, teste_usual)
-sqrt(mean((teste_usual$bikers - pred_lm)^2))
-  
+
+
+----
+fit_xgb_usual <- xgb.train(data = dtrain, nrounds = 750, max_depth = 2, eta = 0.3,
+                     nthread = 16, verbose = FALSE, objective = "reg:squarederror")
+
+pred_xgb_usual <- predict(fit_xgb_usual, dtest)
+
+fitted_xgb_usual <- tibble(
+  .pred = pred_xgb_usual,
+  observado = teste_usual$bikers,
+  modelo = "xgboost - usual")
+
+fitted <-  fitted %>% 
+  bind_rows(fitted_xgb_usual)
+
+sqrt(mean((teste_usual$bikers - pred_xgb_usual)^2))
+
+
+#visualizando erro
+ggplot() +
+  geom_point(aes(x=teste_usual$bikers, y = pred_xgb_usual))+
+  geom_abline(intercept = 0, slope = 1,color = "red", linetype = "dashed", linewidth = 0.7) +
+  theme_bw()
+
+
+
+
 # XGBoost - formato tidymodels --------------------------------------------
 
 boost <- boost_tree(trees = tune(), learn_rate = tune(), mtry = tune(),
@@ -344,7 +428,7 @@ fitted_xgb %>%
 fitted <-  fitted %>% 
   bind_rows(fitted_xgb)
 
-# Resultados e comentários finais -----------------------------------------
+# Resultados formato tidy -----------------------------------------
 
 fitted %>% 
   group_by(modelo) %>% 
